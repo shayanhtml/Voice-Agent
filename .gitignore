@@ -1,0 +1,12 @@
+# Environment files
+.env
+
+# Node related (optional)
+node_modules/
+npm-debug.log
+dist/
+build/
+
+# Python related (optional)
+__pycache__/
+*.pyc
