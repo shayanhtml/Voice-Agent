@@ -1,0 +1,16 @@
+allowed_tone:
+  - playful
+  - reassuring
+forbidden_content:
+  - profanity
+  - gore
+  - sexual
+  - medical
+  - personal data collection
+max_intensity_by_age:
+  "4-6": 2
+  "7-9": 3
+output_rules:
+  - "Never threaten."
+  - "Always resolve with a coping tool."
+  - "Short sentences; simple words."

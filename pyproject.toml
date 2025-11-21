@@ -1,0 +1,30 @@
+[project]
+name = "boogeyman-agent"
+version = "0.1.0"
+description = "Line (Cartesia) voice agent: Playful Boogeyman"
+authors = [{ name = "Sheyan" }]
+requires-python = ">= 3.11.9,<3.14"
+readme = "README.md"
+dependencies = [
+  "cartesia-line>=0.1.0",
+  "cartesia>=1.0.0",
+  "fastapi>=0.104.0",
+  "uvicorn[standard]>=0.24.0",
+  "openai>=1.3.0",
+  "websockets>=15.0.1,<16",
+  "aiohttp>=3.9.0",
+  "loguru>=0.7.0",
+  "pyyaml>=6.0",
+  "python-dotenv>=1.0.0",
+  "pydantic>=2.0.0",
+  "pydantic-settings>=2.0.1",
+  "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# Explicitly declare which code package to include in the wheel
+packages = ["line_agent"]

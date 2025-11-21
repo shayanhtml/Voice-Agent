@@ -1,0 +1,13 @@
+cartesia-line>=0.1.0
+cartesia>=1.0.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+openai>=1.3.0
+websockets>=15.0.1,<16
+aiohttp>=3.9.0
+loguru>=0.7.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.1
+httpx>=0.27.0
