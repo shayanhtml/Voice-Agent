@@ -243,6 +243,9 @@ async def boogeyman_ws(websocket: WebSocket):
     HINT_TO_PHASE = BoogeymanReasoningNode.HINT_TO_PHASE
     PARENT_OVERRIDE_TO_PHASE = BoogeymanReasoningNode.PARENT_OVERRIDE_TO_PHASE
 
+    # Track agent speaking state to prevent interruptions
+    agent_speaking = {"active": False, "queued_user_input": None}
+
     # Idle timeout for WS: prefer header override, else env default
     try:
         WS_IDLE_SECONDS = float(
@@ -318,10 +321,10 @@ async def boogeyman_ws(websocket: WebSocket):
 
     async def _ask_next_question():
         prompts = [
-            "Quick setup: what's the scenario? (bedtime, not listening, mess)",
-            "Pick a consequence: (getYou, takeSomethingAway, monsterChoice)",
-            "Fear level: high or low?",
-            "Tone preference: escalate or de-escalate?",
+            "Quick setup: what's the scenario? Choose bedtime, not listening, or doing something messy.",
+            "Pick a consequence: Choose get you, take something away, or monster's choice.",
+            "Fear level: Choose high or low.",
+            "Tone preference: Choose escalate or de escalate.",
             "What's the child's name?",
         ]
         if config_step < len(prompts):
@@ -403,6 +406,9 @@ async def boogeyman_ws(websocket: WebSocket):
                         send_audio = (websocket.query_params.get("audio") or "").lower() in {"1","true","yes"}
                         send_audio = send_audio or ((websocket.headers.get("x-audio") or "").lower() in {"1","true","yes"})
                         
+                        # Mark agent as speaking
+                        agent_speaking["active"] = True
+                        
                         # Send text responses immediately for faster perceived response
                         for sentence in getattr(turn, "sentences", []):
                             await websocket.send_json({
@@ -424,6 +430,7 @@ async def boogeyman_ws(websocket: WebSocket):
                                         "control": getattr(turn, "control", {}),
                                     })
                         
+                        agent_speaking["active"] = False
                         have_intro = True
                     except StopIteration:
                         pass
@@ -468,37 +475,72 @@ async def boogeyman_ws(websocket: WebSocket):
             # Wizard: collect initial configuration before normal flow
             if config_mode and mtype in {"transcript", "text", "user", "user_message", "user-message"}:
                 raw = str(message.get("text") or message.get("content") or "").strip().lower()
-                # Step 0: scenario
+                # Handle empty input during config - re-prompt instead of failing silently
+                if not raw or len(raw) < 2:
+                    prompts = [
+                        "I didn't catch that. Quick setup: what's the scenario? Choose bedtime, not listening, or doing something messy.",
+                        "I didn't hear you. Pick a consequence: Choose getYou, takeSomethingAway, or monsterChoice.",
+                        "Sorry, I missed that. Fear level: Choose high or low.",
+                        "Couldn't hear you. Tone preference: Choose escalate or de-escalate.",
+                        "What's the child's name? ",
+                    ]
+                    await websocket.send_json({"type": "agent_response", "text": prompts[min(config_step, len(prompts)-1)], "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
+                    _touch(); message=None; continue
+                # Step 0: scenario - expanded keyword matching for better ASR recognition
                 if config_step == 0:
-                    mapping = {"bedtime": "bedtime", "not listening": "not_listening", "not_listening": "not_listening", "mess": "mess"}
-                    val = mapping.get(raw) or ("not_listening" if "listen" in raw else ("bedtime" if "bed" in raw else ("mess" if "mess" in raw else None)))
+                    # Comprehensive keyword lists for ASR variations
+                    val = None
+                    if any(kw in raw for kw in ["bedtime", "bed time", "bed", "sleep", "night", "bad time", "bet time", "dead time", "best time", "beth time", "sleeping", "sleepy", "nap", "rest"]):
+                        val = "bedtime"
+                    elif any(kw in raw for kw in ["not listening", "not listen", "listen", "ignoring", "won't listen", "doesn't listen", "disobey", "not lessening", "knot listening", "nat listening", "defiant", "refusing", "rebel"]):
+                        val = "not_listening"
+                    elif any(kw in raw for kw in ["mess", "messy", "clean", "dirty", "room", "toys", "mass", "mett", "matt", "mat", "matte", "math", "mas", "mace", "mesh", "mash", "match", "messed"]):
+                        val = "mess"
                     if not val:
-                        await websocket.send_json({"type": "agent_response", "text": "Please choose: bedtime, not_listening, or mess.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
+                        await websocket.send_json({"type": "agent_response", "text": "Please choose: bedtime, not listening, or doing something messy.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
                         _touch(); message=None; continue
                     config_data["scenario"] = val; config_step += 1; await _ask_next_question(); _touch(); message=None; continue
-                # Step 1: consequence
+                # Step 1: consequence - improved keyword matching with phonetic variations
                 if config_step == 1:
-                    mapping = {"getyou": "getYou", "get you": "getYou", "monsterchoice": "monsterChoice", "monster's choice": "monsterChoice", "monsters choice": "monsterChoice", "take something away": "takeSomethingAway", "takesomethingaway": "takeSomethingAway"}
-                    key = raw.replace("'", "")
-                    val = mapping.get(key) or ("monsterChoice" if "monster" in key else ("takeSomethingAway" if "take" in key or "away" in key else ("getYou" if "get" in key else None)))
+                    val = None
+                    if any(kw in raw for kw in ["monster", "scare", "choice", "decide", "munster", "monster pick", "scary choice", "monster way", "monster voice"]):
+                        val = "monsterChoice"
+                    elif any(kw in raw for kw in ["take", "away", "toy", "something", "remove", "confiscate", "take it", "cake something", "tape something", "privilege"]):
+                        val = "takeSomethingAway"
+                    elif any(kw in raw for kw in ["get", "come", "you", "git", "getcha", "get ya", "catch", "grab", "find"]):
+                        val = "getYou"
                     if not val:
                         await websocket.send_json({"type": "agent_response", "text": "Choose: getYou, monsterChoice, or takeSomethingAway.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
                         _touch(); message=None; continue
                     config_data["consequence"] = val; config_step += 1; await _ask_next_question(); _touch(); message=None; continue
-                # Step 2: fear level
+                # Step 2: fear level - expanded recognition for ASR variations
                 if config_step == 2:
-                    is_high = raw in {"high", "h", "1", "true", "yes"} or ("high" in raw)
-                    is_low = raw in {"low", "l", "0", "false", "no"} or ("low" in raw)
+                    is_high = any(kw in raw for kw in ["high", "hi", "hight", "height", "hy", "hai", "hey", "h", "1", "yes", "scary", "very", "really scary", "very scary"])
+                    is_low = any(kw in raw for kw in ["low", "lo", "loo", "lowe", "slow", "l", "0", "2", "no", "gentle", "not scary", "little", "less", "minimum", "fine", "normal", "okay"])
                     if not (is_high or is_low):
-                        await websocket.send_json({"type": "agent_response", "text": "Say 'high' or 'low'.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
+                        await websocket.send_json({"type": "agent_response", "text": "Choose 'high' or 'low'.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
                         _touch(); message=None; continue
                     config_data["is_high_fear"] = bool(is_high and not is_low)
                     config_step += 1; await _ask_next_question(); _touch(); message=None; continue
-                # Step 3: tone preference
+                # Step 3: tone preference - improved matching with priority for de-escalate
                 if config_step == 3:
-                    tone = "escalate" if "escal" in raw else ("de_escalate" if "de" in raw or "calm" in raw or "praise" in raw else None)
+                    tone = None
+                    # Check for numeric options first
+                    if raw in {"2", "two"}:
+                        tone = "de_escalate"
+                    elif raw in {"1", "one"}:
+                        tone = "escalate"
+                    # Check for "de" prefix (high priority)
+                    elif "de " in raw or "de-" in raw or "de_" in raw or raw.startswith("de") or "dee" in raw:
+                        tone = "de_escalate"
+                    # Check other de-escalate keywords with phonetic variations
+                    elif any(kw in raw for kw in ["calm", "praise", "gentle", "softer", "lighter", "slow", "reduce", "less", "chill", "relax", "mellow", "ease", "dial back", "dial down", "be nice", "be gentle"]):
+                        tone = "de_escalate"
+                    # Only match escalate if no de-escalate indicators, with phonetic variations
+                    elif any(kw in raw for kw in ["escal", "scale", "up", "more", "speed", "escalade", "ramp", "intensify", "turn up", "amp up", "scarier"]):
+                        tone = "escalate"
                     if not tone:
-                        await websocket.send_json({"type": "agent_response", "text": "Say 'escalate' or 'de_escalate'.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
+                        await websocket.send_json({"type": "agent_response", "text": "Choose 'escalate' or 'de-escalate'.", "control": {"phase": "introduction", "classification": "ongoing", "intensity": 0}})
                         _touch(); message=None; continue
                     config_data["tone"] = tone; config_step += 1; await _ask_next_question(); _touch(); message=None; continue
                 # Step 4: child name
@@ -536,6 +578,9 @@ async def boogeyman_ws(websocket: WebSocket):
                             })
                         send_audio = (websocket.query_params.get("audio") or "").lower() in {"1","true","yes"}
                         send_audio = send_audio or ((websocket.headers.get("x-audio") or "").lower() in {"1","true","yes"})
+                        
+                        agent_speaking["active"] = True
+                        
                         for sentence in getattr(turn, "sentences", []):
                             await websocket.send_json({"type": "agent_response", "text": sentence, "control": getattr(turn, "control", {})})
                         if send_audio and tts.is_configured():
@@ -543,6 +588,8 @@ async def boogeyman_ws(websocket: WebSocket):
                                 audio = tts.synthesize(sentence)
                                 if audio:
                                     await websocket.send_json({"type": "audio_chunk", "content_type": "audio/wav", "b64": CartesiaTTS.to_b64(audio), "text": sentence, "control": getattr(turn, "control", {})})
+                        
+                        agent_speaking["active"] = False
                         have_intro = True
                     except StopIteration:
                         pass
@@ -551,6 +598,15 @@ async def boogeyman_ws(websocket: WebSocket):
             # Transcript -> generate
             if mtype in {"transcript", "text", "user", "user_message", "user-message"}:
                 text = message.get("text") or message.get("content") or ""
+                
+                # If agent is currently speaking, queue the user input instead of interrupting
+                if agent_speaking["active"]:
+                    logger.info("Agent speaking - queuing user input: %s", text)
+                    agent_speaking["queued_user_input"] = text
+                    _touch()
+                    message = None
+                    continue
+                
                 gen = node.generate({
                     "participant_text": str(text),
                     "participant_role": "parent",
@@ -574,6 +630,9 @@ async def boogeyman_ws(websocket: WebSocket):
                 except Exception:
                     pass
 
+                # Mark agent as speaking
+                agent_speaking["active"] = True
+                
                 # Sentences (with optional audio chunks)
                 send_audio = (websocket.query_params.get("audio") or "").lower() in {"1","true","yes"}
                 send_audio = send_audio or ((websocket.headers.get("x-audio") or "").lower() in {"1","true","yes"})
@@ -598,6 +657,61 @@ async def boogeyman_ws(websocket: WebSocket):
                                 "text": sentence,
                                 "control": getattr(turn, "control", {}),
                             })
+                
+                # Agent finished speaking
+                agent_speaking["active"] = False
+                
+                # Process any queued user input
+                if agent_speaking["queued_user_input"]:
+                    queued_text = agent_speaking["queued_user_input"]
+                    agent_speaking["queued_user_input"] = None
+                    logger.info("Processing queued user input: %s", queued_text)
+                    
+                    # Generate response to queued input
+                    gen = node.generate({
+                        "participant_text": str(queued_text),
+                        "participant_role": "parent",
+                        "extra_context": {},
+                    })
+                    try:
+                        queued_turn = next(gen)
+                        
+                        # Send stage signal
+                        try:
+                            stage = _phase_to_stage(queued_turn.phase)
+                            await websocket.send_json({
+                                "type": "stage_signal",
+                                "data": {"phase": queued_turn.phase, "classification": queued_turn.classification, "stage": stage},
+                            })
+                        except Exception:
+                            pass
+                        
+                        # Mark agent as speaking again
+                        agent_speaking["active"] = True
+                        
+                        # Send responses
+                        for sentence in getattr(queued_turn, "sentences", []):
+                            await websocket.send_json({
+                                "type": "agent_response",
+                                "text": sentence,
+                                "control": getattr(queued_turn, "control", {}),
+                            })
+                        
+                        if send_audio and tts.is_configured():
+                            for sentence in getattr(queued_turn, "sentences", []):
+                                audio = tts.synthesize(sentence)
+                                if audio:
+                                    await websocket.send_json({
+                                        "type": "audio_chunk",
+                                        "content_type": "audio/wav",
+                                        "b64": CartesiaTTS.to_b64(audio),
+                                        "text": sentence,
+                                        "control": getattr(queued_turn, "control", {}),
+                                    })
+                        
+                        agent_speaking["active"] = False
+                    except StopIteration:
+                        agent_speaking["active"] = False
                 
                 _touch()
                 message = None

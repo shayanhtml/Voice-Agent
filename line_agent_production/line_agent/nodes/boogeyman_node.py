@@ -323,6 +323,9 @@ class BoogeymanReasoningNode(ReasoningNode):
         if self._config_mode:
             text = (participant_text or "").strip()
             if not text:
+                # Don't silently ignore empty input during config - re-prompt
+                event = AgentResponse(content=self._config_question(self._config_step))
+                yield event
                 return
             advanced = await self._handle_config_answer(text)
             if advanced:
@@ -471,10 +474,10 @@ class BoogeymanReasoningNode(ReasoningNode):
 
     def _config_question(self, step: int) -> str:
         prompts = [
-            "Quick setup: what's the scenario? bedtime, not listening, or mess.",
-            "Pick a consequence. get you, monster's choice, or take something away.",
-            "Fear level: say high or low.",
-            "Tone preference:  Choose escalate or de escalate.",
+            "Quick setup: what's the scenario? Choose bedtime, not listening, or mess.",
+            "Pick a consequence. Choose get you, monster's choice, or take something away.",
+            "Fear level: Choose high or low.",
+            "Tone preference: Choose escalate or de escalate.",
             "What is the child's name?",
         ]
         return prompts[min(step, len(prompts) - 1)]
@@ -516,9 +519,9 @@ class BoogeymanReasoningNode(ReasoningNode):
         events: List[object] = []
         # Normalize but keep the original for names, etc.
         text = raw.strip().lower()
-        if not text:
-            # Do not advance on pure silence; gently reprompt.
-            events.append(AgentResponse(content=self._config_question(self._config_step)))
+        if not text or len(text) < 2:
+            # Do not advance on pure silence or very short input; gently reprompt with context.
+            events.append(AgentResponse(content=f"I didn't catch that. {self._config_question(self._config_step)}"))
             return events
         
         # Deduplicate repeated words: "high high" → "high", "low low low" → "low"
@@ -535,18 +538,27 @@ class BoogeymanReasoningNode(ReasoningNode):
                 "bedtime", "time to sleep", "go to sleep", "sleep time", "go to bed", "lay down",
                 "sleep now", "night time", "it's night", "bed now", "bad time", "bed time",
                 "bed-time", "bed side", "bed line", "bet time", "bed sign", "bed dime",
-                "bed", "sleep", "night", "laying down"
+                "bed", "sleep", "night", "laying down",
+                # Phonetic ASR variations
+                "bedtime", "bet time", "bed time", "dead time", "best time", "beth time",
+                "sleeping", "sleepy", "nap", "nap time", "rest", "rest time"
             }
             not_listening_keywords = {
                 "not listening", "won't listen", "doesn't listen", "ignoring me", "not paying attention",
                 "he doesn't hear me", "she won't listen", "won't follow", "not following", "not obeying",
                 "not listing", "not glistening", "not listen", "not listen ing", "no listening",
-                "not hearing", "don't listen", "listen", "ignoring", "disobey", "won't mind"
+                "not hearing", "don't listen", "listen", "ignoring", "disobey", "won't mind",
+                # Phonetic ASR variations
+                "not lessening", "not glistening", "knot listening", "nat listening", "not lesson",
+                "doesn't obey", "disobeying", "defiant", "refusing", "won't obey", "rebel", "rebellious"
             }
             mess_keywords = {
                 "mess", "messy", "making a mess", "room is a mess", "everything messy", "dirty room",
                 "clean up", "won't clean", "not cleaning", "clean your toys", "mass", "message",
-                "messs", "met", "messed", "lesson", "clean", "dirty", "toys", "room", "mett"
+                "messs", "met", "messed", "lesson", "clean", "dirty", "toys", "room", "mett",
+                # Phonetic ASR variations that sound like "mess"
+                "matt", "mat", "matte", "math", "mas", "mace", "mesh", "mash", "match",
+                "mess up", "messed up", "messin", "messing"
             }
             
             is_bedtime = any(kw in text for kw in bedtime_keywords)
@@ -578,24 +590,31 @@ class BoogeymanReasoningNode(ReasoningNode):
             return events
         # Step 1: consequence
         if step == 1:
-            mapping = {
-                "getyou": "getYou",
-                "get you": "getYou",
-                "monsterchoice": "monsterChoice",
-                "monster's choice": "monsterChoice",
-                "monsters choice": "monsterChoice",
-                "take something away": "takeSomethingAway",
-                "takesomethingaway": "takeSomethingAway",
+            # Comprehensive keyword sets with phonetic ASR variations
+            getyou_keywords = {
+                "get you", "getyou", "get u", "getcha", "get ya", "come get you",
+                "git you", "git u", "catch you", "grab you", "find you", "get em"
             }
-            key = text.replace("'", "")
-            val = mapping.get(key)
-            if not val:
-                if "monster" in key or "scare" in key:
-                    val = "monsterChoice"
-                elif "take" in key or "away" in key or "toy" in key:
-                    val = "takeSomethingAway"
-                elif "get" in key or "come" in key:
-                    val = "getYou"
+            monsterchoice_keywords = {
+                "monster's choice", "monsters choice", "monsterchoice", "monster choice",
+                "monster decides", "monster's decide", "monsters decide", "let monster choose",
+                "monster pick", "monster decide", "scare", "scarier", "scary choice",
+                "monster way", "munster choice", "monster voice", "monster toys"
+            }
+            takesomethingaway_keywords = {
+                "take something away", "takesomethingaway", "take away", "take something",
+                "take toy", "take toys away", "remove something", "take privilege",
+                "take it away", "take stuff away", "confiscate", "remove toy",
+                "cake something away", "tape something away", "stake something away"
+            }
+            
+            val = None
+            if any(kw in text for kw in monsterchoice_keywords):
+                val = "monsterChoice"
+            elif any(kw in text for kw in takesomethingaway_keywords):
+                val = "takeSomethingAway"
+            elif any(kw in text for kw in getyou_keywords):
+                val = "getYou"
             # If keyword matching failed, try LLM parsing
             if not val:
                 llm_result = self._llm_parse_config(step, raw)
@@ -641,7 +660,7 @@ class BoogeymanReasoningNode(ReasoningNode):
                     is_low = True
             
             if not (is_high or is_low):
-                events.append(AgentResponse(content="Say 'high' or 'low'."))
+                events.append(AgentResponse(content="Choose 'high' or 'low'."))
                 return events
             self._config_data["is_high_fear"] = bool(is_high and not is_low)
             self._config_step += 1
@@ -661,16 +680,23 @@ class BoogeymanReasoningNode(ReasoningNode):
             elif "de " in text or "de-" in text or "de_" in text or text.startswith("de"):
                 tone = "de_escalate"
             else:
-                # Keyword matching with lists for better control
+                # Keyword matching with lists for better control including phonetic variations
                 escalate_keywords = [
                     "escalate", "escalator", "esculate", "excalate", "escalation", "escape late",
-                    "extra late", "scale it", "scale up", "speed up", "pick up"
+                    "extra late", "scale it", "scale up", "speed up", "pick up",
+                    # Phonetic variations
+                    "escalade", "escalated", "ask a late", "ask elate", "ex escalate",
+                    "more scary", "scarier", "intensify", "ramp up", "turn up", "amp up"
                 ]
                 deescalate_keywords = [
                     "deescalate", "cool down", "reduce", "make it low", "low it down", "go lower",
                     "calm it", "less scary", "lower level", "go down", "reduce it", "slow down",
                     "soften it", "tone it down", "undo", "back off", "calm", "praise", "gentle",
-                    "softer", "calmer", "lighter", "ease up"
+                    "softer", "calmer", "lighter", "ease up",
+                    # Phonetic variations
+                    "de escalade", "dee escalate", "descalate", "this escalate", "these escalate",
+                    "chill", "chill out", "relax", "mellow", "ease off", "dial back", "dial down",
+                    "be nice", "be nicer", "be gentle", "be calm", "be soft"
                 ]
                 
                 # Check de-escalate first (more specific)
@@ -690,7 +716,7 @@ class BoogeymanReasoningNode(ReasoningNode):
                     tone = "de_escalate"
             
             if not tone:
-                events.append(AgentResponse(content="Say 'escalate' or 'de escalate'."))
+                events.append(AgentResponse(content="Choose 'escalate' or 'de escalate'."))
                 return events
             self._config_data["tone"] = tone
             self._config_step += 1

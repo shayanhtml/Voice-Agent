@@ -120,7 +120,7 @@ class MonsterConversationController:
         self.current_index: int = 0
         self.history: List[TurnRecord] = []
         # Timeout for LLM responses; fallback to scripted after this
-        self.request_timeout_seconds = settings.llm_timeout or settings.llm_timeout_seconds
+        self.request_timeout_seconds = settings.llm_timeout_seconds
 
         self.prompt_dir = prompt_dir or Path(__file__).resolve().parent.parent / "prompts"
         self.system_prompt = self._build_system_prompt()
